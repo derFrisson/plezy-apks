@@ -1,0 +1,145 @@
+name: Extract Plezy APKs
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC
+    - cron: "0 6 * * *"
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Get latest Plezy release
+        id: plezy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_JSON=$(gh api repos/edde746/plezy/releases/latest)
+          TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+          BODY=$(echo "$RELEASE_JSON" | jq -r '.body')
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          
+          # Save release body for later
+          echo "$BODY" > /tmp/release_body.md
+
+      - name: Check if release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.plezy.outputs.tag }}" &>/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release ${{ steps.plezy.outputs.tag }} already exists, skipping."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::New release ${{ steps.plezy.outputs.tag }} found, extracting APKs."
+          fi
+
+      - name: Download and extract APKs
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.plezy.outputs.tag }}"
+          RELEASE_JSON=$(gh api repos/edde746/plezy/releases/tags/$TAG)
+          
+          mkdir -p apks
+          
+          ARCHS=("arm64-v8a" "armeabi-v7a" "x86_64")
+          
+          for ARCH in "${ARCHS[@]}"; do
+            ASSET_NAME="plezy-android-${ARCH}.tar.gz"
+            
+            # Get the download URL for this asset
+            DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r \
+              --arg name "$ASSET_NAME" \
+              '.assets[] | select(.name == $name) | .browser_download_url')
+            
+            if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+              echo "::warning::Asset $ASSET_NAME not found in release $TAG, skipping."
+              continue
+            fi
+            
+            echo "Downloading $ASSET_NAME..."
+            curl -fsSL -o "/tmp/${ASSET_NAME}" "$DOWNLOAD_URL"
+            
+            echo "Extracting APK from $ASSET_NAME..."
+            tar -xzf "/tmp/${ASSET_NAME}" -C /tmp/
+            
+            # Find the extracted APK and rename it
+            APK_FILE=$(find /tmp -maxdepth 1 -name "*.apk" -newer "/tmp/${ASSET_NAME}" -o -name "*.apk" -newer /tmp/ 2>/dev/null | head -1)
+            
+            # Fallback: look for any apk extracted from the tar
+            if [ -z "$APK_FILE" ]; then
+              APK_FILE=$(find /tmp -maxdepth 2 -name "*.apk" | grep -i "$ARCH\|plezy" | head -1)
+            fi
+            
+            # Second fallback: just list what was extracted
+            if [ -z "$APK_FILE" ]; then
+              echo "Listing tar contents:"
+              tar -tzf "/tmp/${ASSET_NAME}"
+              # Try extracting to a dedicated directory
+              mkdir -p /tmp/extract-${ARCH}
+              tar -xzf "/tmp/${ASSET_NAME}" -C /tmp/extract-${ARCH}/
+              APK_FILE=$(find /tmp/extract-${ARCH} -name "*.apk" | head -1)
+            fi
+            
+            if [ -n "$APK_FILE" ]; then
+              cp "$APK_FILE" "apks/plezy-android-${ARCH}.apk"
+              echo "✅ Extracted: plezy-android-${ARCH}.apk"
+            else
+              echo "::error::Could not find APK in $ASSET_NAME"
+              echo "Contents of archive:"
+              tar -tzf "/tmp/${ASSET_NAME}"
+            fi
+          done
+          
+          echo "--- Extracted APKs ---"
+          ls -lh apks/
+
+      - name: Create release with APKs
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.plezy.outputs.tag }}"
+          
+          APK_COUNT=$(find apks -name "*.apk" | wc -l)
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "::error::No APKs extracted, aborting release creation."
+            exit 1
+          fi
+          
+          # Build release notes
+          {
+            echo "## Plezy $TAG — Standalone APKs"
+            echo ""
+            echo "APKs extracted from [edde746/plezy $TAG](https://github.com/edde746/plezy/releases/tag/$TAG) for Obtainium compatibility."
+            echo ""
+            echo "### Available APKs"
+            echo "| File | Architecture | Use for |"
+            echo "|------|-------------|---------|"
+            echo "| \`plezy-android-arm64-v8a.apk\` | ARM 64-bit | Most modern phones |"
+            echo "| \`plezy-android-armeabi-v7a.apk\` | ARM 32-bit | Older phones |"
+            echo "| \`plezy-android-x86_64.apk\` | x86_64 | Emulators, ChromeOS |"
+            echo ""
+            echo "---"
+            echo ""
+            echo "### Upstream Release Notes"
+            cat /tmp/release_body.md
+          } > /tmp/notes.md
+          
+          gh release create "$TAG" \
+            --title "Plezy $TAG" \
+            --notes-file /tmp/notes.md \
+            apks/*.apk
+          
+          echo "✅ Release $TAG created with $APK_COUNT APK(s)."
