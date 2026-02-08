@@ -1,6 +1,6 @@
 # Plezy APK Releases
 
-[![Extract Plezy APKs](https://github.com/derFrisson/plezy-apks/actions/workflows/extract-apk.yml/badge.svg)](https://github.com/derFrisson/plezy-apks/actions/workflows/extract-apk.yml)
+[![Extract Plezy APKs](https://github.com/derFrisson/plezy-apks/actions/workflows/extract.yaml/badge.svg)](https://github.com/derFrisson/plezy-apks/actions/workflows/extract.yaml)
 
 Standalone `.apk` files automatically extracted from [edde746/plezy](https://github.com/edde746/plezy) releases — ready to install or use with [Obtainium](https://github.com/ImranR98/Obtainium).
 
